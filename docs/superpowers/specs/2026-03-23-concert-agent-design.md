@@ -2,6 +2,7 @@
 
 **Date:** 2026-03-23
 **Status:** Approved
+**Python:** 3.10+
 
 ---
 
@@ -22,6 +23,8 @@ Future automation: add a system cron entry using the first-Monday-of-month expre
 ```
 0 8 1-7 * 1   python /path/to/concertgoer/main.py run
 ```
+The expression `1-7 * 1` means: day-of-month 1–7, any month, only on Mondays —
+which selects exactly the first Monday of each month.
 
 ---
 
@@ -62,11 +65,11 @@ main.py run
     │
     ├─► birchmere_scraper.py
     │       GET birchmere.com, parse upcoming shows
-    │       Returns list[VenueShow]
+    │       Returns list[VenueShow]  (empty list on error — see error handling)
     │
     ├─► jamminjava_scraper.py
     │       GET jamminjava.com, parse upcoming shows
-    │       Returns list[VenueShow]
+    │       Returns list[VenueShow]  (empty list on error — see error handling)
     │
     ├─► venue_picker.py
     │       Takes combined list[VenueShow]
@@ -81,7 +84,7 @@ main.py run
     └─► email_sender.py
             Formats two-section plain-text email
             Sends via Gmail OAuth
-            Returns message ID
+            Returns message ID (raises on failure — state not updated)
 ```
 
 ---
@@ -92,27 +95,35 @@ main.py run
 @dataclass
 class Show:
     artist: str
-    date: datetime
+    date: datetime            # timezone-naive, Eastern time assumed
     venue_name: str
     city: str
     ticket_url: str | None
-    show_id: str          # Bandsintown event ID, used for dedup
+    show_id: str              # Bandsintown event ID, used for dedup
 
 @dataclass
 class VenueShow:
     act: str
-    date: datetime
-    venue: str            # "The Birchmere" or "Jammin Java"
-    url: str              # Show page URL, used for dedup
+    date: datetime            # timezone-naive, Eastern time assumed; parsed from HTML
+    venue: str                # "The Birchmere" or "Jammin Java"
+    url: str                  # Show page URL, used for dedup
 
 @dataclass
 class Pick:
     act: str
-    date: datetime
+    date: datetime            # parsed from ISO 8601 string in Claude JSON response
     venue: str
     rationale: str
     url: str
 ```
+
+**Date parsing notes:**
+- `Show.date`: parsed from Bandsintown ISO 8601 datetime string in API response;
+  missing, null, or malformed value → show skipped with a logged warning
+- `VenueShow.date`: parsed from HTML date strings by each scraper; if a date cannot
+  be parsed the show is skipped with a logged warning
+- `Pick.date`: Claude is instructed to return dates as `YYYY-MM-DD`; parsed to
+  `datetime` at midnight; unparseable value → show skipped with a logged warning
 
 ---
 
@@ -142,17 +153,22 @@ Both the states list and cities list are configurable in `config.yaml`.
 - **Key acquisition:** No formal key required for personal/non-commercial use; registration available at artists.bandsintown.com
 - **Free tier:** Fully supports this use case — returns all upcoming events per artist including venue, date, city, lat/lon, and ticket links
 - **Rate limiting:** Undocumented; generous for personal scale (30 artists)
-- **Scraping fallback:** If the API becomes unavailable, `artist_tracker.py` falls back to scraping `bandsintown.com/{ARTIST_NAME}` pages
+- **Scraping fallback:** Deferred to future work (see below)
 
 ---
 
 ## Venue Scraping
 
 Two independent scrapers, one per venue. Each:
-- GETs the venue's public calendar page
+- GETs the venue's public calendar page with `requests`
 - Parses with BeautifulSoup
 - Returns `list[VenueShow]`
 - Ships with a saved HTML fixture for offline testing
+
+**Error handling:** Any HTTP error (network failure, 4xx/5xx) or parsing exception
+→ log a warning including the venue name and error, return `[]`. The run continues
+with an empty list for that venue. Zero-result parsing (no shows found in otherwise
+valid HTML) is also logged as a warning but does not abort the run.
 
 Venues:
 - **The Birchmere** — `https://www.birchmere.com`
@@ -163,9 +179,20 @@ Venues:
 ## Venue Picker (Anthropic API)
 
 - **Model:** `claude-sonnet-4-20250514`
-- **Input:** Full `list[VenueShow]` serialized to text + taste profile (below)
-- **Output:** JSON array; each element: `{act, date, venue, rationale, url}`
-- **Error handling:** Malformed JSON response → log warning, return `[]`; run continues and sends artist shows only
+- **SDK call pattern:** Single `messages.create` call with one user-role message
+  containing the serialized show list and taste profile. Claude is instructed in
+  the message body to return a raw JSON array (no markdown fences). No tool_use
+  or structured output feature is used; the response `.content[0].text` is parsed
+  directly as JSON.
+- **Prompt structure:** The user message contains: (1) the taste profile, (2) the
+  full show list formatted as plain text (one show per line: act, date, venue),
+  (3) explicit instruction to return a JSON array of up to 5 picks, each with
+  fields `{act, date, venue, rationale, url}` where `date` is `YYYY-MM-DD`.
+- **Max picks:** 5 (stated in the prompt; enforced by post-processing if Claude
+  returns more)
+- **Error handling:** Malformed JSON response → log warning, return `[]`; run
+  continues and sends artist shows only. API call failure (network, auth) → log
+  error and raise; run aborts.
 
 **Taste profile used in prompt:**
 > "I'm drawn to literate, emotionally honest songwriting — Americana, folk, and
@@ -197,11 +224,20 @@ Venues:
 - `mark_reported(shows)` — appends IDs/URLs; uses atomic write (write to `.tmp`, rename)
 - State is only updated after a successful email send; a failed send does not update state
 
+**Failure cases:**
+- `reported.json` missing at startup → treat as empty state (create fresh on next write)
+- `reported.json` exists but contains malformed JSON → log warning, treat as empty state
+- `.tmp` write fails (disk full, permissions) → log error, raise; state not updated
+- Atomic rename fails → log error, raise; state not updated (`.tmp` left on disk for diagnosis)
+
 ---
 
 ## Email Format
 
 **Subject:** `Concert Digest: April 2026`
+
+**From address:** Derived automatically from the authenticated Gmail OAuth account;
+no explicit `from_address` config is required.
 
 **Body (plain text):**
 ```
@@ -228,11 +264,39 @@ CONCERT DIGEST: APRIL 2026
 ──────────────────────────────────────────────────────
 ```
 
-- Artist Tour Dates: grouped by artist, sorted by date within each artist
-- Venue Picks: sorted by date; rationale word-wrapped at 68 chars
+- **Artist Tour Dates:** Artists sorted by their earliest upcoming show date;
+  alphabetical as tiebreaker. Shows sorted by date within each artist.
+- **Venue Picks:** Sorted by date; rationale word-wrapped at 68 chars
 - Ticket/show URL on its own indented line
 - If a section has no new shows: `  (no new shows this month)`
 - If both sections are empty: no email sent, logged as info
+
+**Email send error handling:** Gmail API exceptions are caught in `email_sender.py`,
+logged as errors, and re-raised so `main.py` can exit with a non-zero code. No
+retries are attempted. Because the exception propagates before `state_store.mark_reported`
+is called, state is never updated on a failed send.
+
+---
+
+## CLI
+
+```
+python main.py run        # Fetch, filter, send digest email
+python main.py preview    # Dry run: print email to stdout, no send, no state update
+python main.py status     # Print state file summary (counts, most recent shows)
+
+Global flags:
+  --config PATH     Path to config.yaml (default: config.yaml)
+  --verbose         Enable debug logging
+```
+
+`preview` is the canonical dry-run command. It is equivalent to `run` with all
+external writes (send + state update) suppressed. There is no separate `--dry-run`
+flag — use `preview` instead.
+
+`status` reads `reported.json` and prints counts and the most recently reported
+show IDs. If `reported.json` is missing or malformed, `status` prints zeros and
+a note that no state has been recorded yet — it does not raise an error.
 
 ---
 
@@ -315,21 +379,6 @@ within each module. No secrets ever enter the config dict passed between modules
 
 ---
 
-## CLI
-
-```
-python main.py run        # Fetch, filter, send digest email
-python main.py preview    # Dry run — print email to stdout, no send, no state update
-python main.py status     # Print state file summary (counts, most recent shows)
-
-Global flags:
-  --config PATH     Path to config.yaml (default: config.yaml)
-  --dry-run         Alias for preview behaviour from within run command
-  --verbose         Enable debug logging
-```
-
----
-
 ## Dependencies
 
 ```
@@ -353,19 +402,22 @@ One `test_<module>.py` per module, alongside the module (no `tests/` subdirector
 
 | File | Approach |
 |------|----------|
-| `test_artist_tracker.py` | Mock `requests.get`; fixture JSON with VA, DC, MD, and out-of-region events; assert filter correctness and Show field population |
-| `test_birchmere_scraper.py` | Saved HTML fixture; assert expected acts, dates, URLs |
-| `test_jamminjava_scraper.py` | Saved HTML fixture; assert expected acts, dates, URLs |
-| `test_venue_picker.py` | Mock Anthropic SDK; assert prompt contains taste profile + show list; test malformed JSON → `[]` |
-| `test_email_sender.py` | Test `format_digest_email()` in isolation; assert section headers, grouping, empty-section handling |
-| `test_state_store.py` | `tmp_path` fixture; test filter, mark-reported, dedup across runs, atomic write |
-| `test_main.py` | Smoke-test `preview` subcommand with mocked sub-modules |
+| `test_artist_tracker.py` | Mock `requests.get`; fixture JSON with VA, DC, MD, and out-of-region events; assert filter correctness, Show field population, and artist name URL-encoding (e.g., "Hootie & The Blowfish") |
+| `test_birchmere_scraper.py` | Saved HTML fixture; assert expected acts, dates, URLs; assert HTTP error returns `[]` with no exception raised |
+| `test_jamminjava_scraper.py` | Same approach as Birchmere; separate fixture and parser |
+| `test_venue_picker.py` | Mock Anthropic SDK; assert prompt contains taste profile + show list + max-5 instruction; test malformed JSON → `[]`; test API exception propagates |
+| `test_email_sender.py` | Test `format_digest_email()` in isolation (pure function); assert section headers, artist sort order, empty-section handling. Separately: mock Gmail API client; assert correct message structure is passed to `send`; assert Gmail exception is re-raised |
+| `test_state_store.py` | `tmp_path` fixture; test filter, mark-reported, dedup across runs, atomic write, missing-file startup, malformed-JSON startup |
+| `test_main.py` | Smoke-test `preview`: assert no state written, no email sent. Smoke-test `run`: assert correct module call order, state updated after successful send, state not updated when email raises. Smoke-test `status`: assert prints summary when state file exists and when it is missing. All sub-modules mocked. |
 
 ---
 
 ## Future Work (out of scope)
 
+- **Bandsintown scraping fallback** — If the API becomes unavailable, fall back to
+  scraping `bandsintown.com/{ARTIST_NAME}` pages with BeautifulSoup. Deferred
+  until API viability is confirmed in practice.
 - Refactor souschef to use `.env` for secrets (matching this agent's security posture)
-- Add system cron entry for first-Monday-of-month automation: `0 8 1-7 * 1`
+- Add system cron entry for first-Monday-of-month automation (see Scheduling section)
 - Add third venue (e.g., 9:30 Club) by adding a new `<venue>_scraper.py`
 - `cities_exclude` config list to suppress noisy out-of-range VA cities
