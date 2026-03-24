@@ -186,10 +186,8 @@ Venues:
   directly as JSON.
 - **Prompt structure:** The user message contains: (1) the taste profile, (2) the
   full show list formatted as plain text (one show per line: act, date, venue),
-  (3) explicit instruction to return a JSON array of up to 5 picks, each with
-  fields `{act, date, venue, rationale, url}` where `date` is `YYYY-MM-DD`.
-- **Max picks:** 5 (stated in the prompt; enforced by post-processing if Claude
-  returns more)
+  (3) explicit instruction to return a JSON array of picks, each with fields
+  `{act, date, venue, rationale, url}` where `date` is `YYYY-MM-DD`.
 - **Error handling:** Malformed JSON response → log warning, return `[]`; run
   continues and sends artist shows only. API call failure (network, auth) → log
   error and raise; run aborts.
@@ -405,7 +403,7 @@ One `test_<module>.py` per module, alongside the module (no `tests/` subdirector
 | `test_artist_tracker.py` | Mock `requests.get`; fixture JSON with VA, DC, MD, and out-of-region events; assert filter correctness, Show field population, and artist name URL-encoding (e.g., "Hootie & The Blowfish") |
 | `test_birchmere_scraper.py` | Saved HTML fixture; assert expected acts, dates, URLs; assert HTTP error returns `[]` with no exception raised |
 | `test_jamminjava_scraper.py` | Same approach as Birchmere; separate fixture and parser |
-| `test_venue_picker.py` | Mock Anthropic SDK; assert prompt contains taste profile + show list + max-5 instruction; test malformed JSON → `[]`; test API exception propagates |
+| `test_venue_picker.py` | Mock Anthropic SDK; assert prompt contains taste profile and show list; test malformed JSON → `[]`; test API exception propagates |
 | `test_email_sender.py` | Test `format_digest_email()` in isolation (pure function); assert section headers, artist sort order, empty-section handling. Separately: mock Gmail API client; assert correct message structure is passed to `send`; assert Gmail exception is re-raised |
 | `test_state_store.py` | `tmp_path` fixture; test filter, mark-reported, dedup across runs, atomic write, missing-file startup, malformed-JSON startup |
 | `test_main.py` | Smoke-test `preview`: assert no state written, no email sent. Smoke-test `run`: assert correct module call order, state updated after successful send, state not updated when email raises. Smoke-test `status`: assert prints summary when state file exists and when it is missing. All sub-modules mocked. |
