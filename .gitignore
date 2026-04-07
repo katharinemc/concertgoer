@@ -1,1 +1,10 @@
 .worktrees/
+.env
+config.yaml
+reported.json
+token.json
+credentials.json
+__pycache__/
+*.pyc
+.pytest_cache/
+fixtures/*.html

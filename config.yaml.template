@@ -1,0 +1,62 @@
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is committed. Never put secrets here — use .env.
+
+email:
+  to_address: your@email.com
+
+bandsintown:
+  states:
+    - VA
+    - DC
+  cities:
+    - Baltimore
+    - Towson
+    - Columbia
+    - Bethesda
+    - Silver Spring
+    - Rockville
+    - Hagerstown
+  artists:
+    - Amy Speace
+    - Amy Rigby
+    - Aimee Mann
+    - Mark Erelli
+    - Lori McKenna
+    - Patty Griffin
+    - Robbie Fulks
+    - Mike Doughty
+    - Mike Viola
+    - Ben Sollee
+    - Sean Nelson
+    - The Long Winters
+    - John Roderick
+    - Harvey Danger
+    - The Red Clay Strays
+    - Emerson Woolf & The Whits
+    - Grace Potter
+    - Nicki Bluhm
+    - Weird Al
+    - Jonathan Coulton
+    - CAKE
+    - Hootie & The Blowfish
+    - Nathaniel Ratliff
+    - Sierra Ferrell
+    - Marcy Playground
+    - Barenaked Ladies
+    - Ray Lamontagne
+    - Eels
+    - Brandi Carlile
+    - Taylor McCall
+    - Jim Lauderdale
+
+venues:
+  - name: The Birchmere
+    url: https://www.birchmere.com
+  - name: Jammin Java
+    url: https://www.jamminjava.com
+
+state:
+  path: reported.json
+
+anthropic:
+  model: claude-sonnet-4-20250514
